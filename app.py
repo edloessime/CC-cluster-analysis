@@ -374,12 +374,13 @@ with st.sidebar:
         type=['csv'],
         key='history_uploader',
     )
-    if restore_file is not None:
+    if restore_file is not None and restore_file.name != st.session_state.get('history_filename'):
         try:
             restored = pd.read_csv(restore_file)
             if _HISTORY_COLS.issubset(set(restored.columns)):
                 restored['Notes'] = restored.get('Notes', '').fillna('')
                 st.session_state['run_history'] = restored.to_dict('records')
+                st.session_state['history_filename'] = restore_file.name
                 st.success(f'Restored {len(restored)} run(s).')
             else:
                 st.error('This does not look like a history file — expected columns are missing.')
