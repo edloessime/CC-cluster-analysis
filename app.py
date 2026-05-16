@@ -219,13 +219,49 @@ def fig_feature_heatmap(clean_df, feature_cols, labels, k, top_n=15):
     top_features = means.var(axis=0).sort_values(ascending=False).head(top_n).index.tolist()
     hm = means[top_features]
     hm_z = (hm - hm.mean()) / (hm.std() + 1e-9)
-    fig, ax = plt.subplots(figsize=(max(8, len(top_features) * 0.75), max(4, k * 0.9)))
-    sns.heatmap(hm_z, annot=True, fmt='.2f', cmap='RdYlGn',
-                linewidths=0.4, ax=ax,
-                cbar_kws={'label': 'Z-score vs cluster mean'})
-    ax.set_title(f'Top {top_n} Differentiating Features per Cluster (Z-scored means)',
-                 fontweight='bold')
-    plt.tight_layout()
+
+    # Shorten column labels: replace underscores with spaces and wrap at 14 chars
+    def short_label(name):
+        name = name.replace('_', ' ')
+        if len(name) > 14:
+            words = name.split()
+            lines, line = [], []
+            for w in words:
+                if sum(len(x) + 1 for x in line) + len(w) > 14:
+                    lines.append(' '.join(line))
+                    line = [w]
+                else:
+                    line.append(w)
+            if line:
+                lines.append(' '.join(line))
+            return '\n'.join(lines)
+        return name
+
+    display_labels = [short_label(f) for f in top_features]
+    hm_z.columns = display_labels
+    hm_z.index = [f'Cluster {i}' for i in hm_z.index]
+
+    cell_w, cell_h = 1.1, 0.7
+    fig_w = max(10, len(top_features) * cell_w + 2)
+    fig_h = max(4, k * cell_h + 3)
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    sns.heatmap(
+        hm_z,
+        annot=True, fmt='.2f', annot_kws={'size': 9},
+        cmap='RdYlGn', linewidths=0.5, linecolor='white',
+        ax=ax,
+        cbar_kws={'label': 'Z-score', 'shrink': 0.8},
+    )
+    ax.set_title(
+        f'Top {top_n} Differentiating Features per Cluster (Z-scored means)',
+        fontweight='bold', fontsize=12, pad=12,
+    )
+    ax.set_xlabel('')
+    ax.set_ylabel('')
+    ax.tick_params(axis='x', labelsize=8, rotation=35)
+    ax.tick_params(axis='y', labelsize=9, rotation=0)
+    fig.subplots_adjust(bottom=0.22, left=0.12, right=0.95, top=0.9)
     return fig, top_features
 
 
