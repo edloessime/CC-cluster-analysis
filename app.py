@@ -1,6 +1,5 @@
 import io
 import warnings
-from matplotlib.backends.backend_pdf import PdfPages
 
 import matplotlib
 matplotlib.use('Agg')
@@ -341,133 +340,316 @@ def build_cluster_profiles(clean_df, feature_cols, labels, k, top_n=5):
     return profiles
 
 
-# ── PDF report builder ─────────────────────────────────────────────────────────
-
-def _pdf_cover(filename, n_rows, feature_cols, k, inertia, sil, db, profiles):
-    """Return a matplotlib figure that serves as the PDF cover/summary page."""
-    unique_counts = [(p['cluster'], p['count'], p['pct']) for p in profiles]
-    cmap = plt.cm.get_cmap(PALETTE, k)
-
-    fig = plt.figure(figsize=(8.5, 11))
-    fig.patch.set_facecolor('white')
-    ax = fig.add_axes([0, 0, 1, 1])
-    ax.axis('off')
-
-    # Header bar
-    ax.add_patch(plt.Rectangle((0, 0.88), 1, 0.12,
-                                transform=ax.transAxes, color='#2c3e50', zorder=0))
-    ax.text(0.5, 0.945, 'Customer Segmentation Report',
-            transform=ax.transAxes, fontsize=22, fontweight='bold',
-            color='white', ha='center', va='center')
-
-    y = 0.82
-    ax.text(0.5, y, f'File: {filename}',
-            transform=ax.transAxes, fontsize=11, ha='center', color='#555')
-    y -= 0.04
-    ax.text(0.5, y, pd.Timestamp.now().strftime('%B %d, %Y'),
-            transform=ax.transAxes, fontsize=10, ha='center', color='#888')
-
-    # Metrics row
-    y -= 0.07
-    for i, (label, val) in enumerate([
-        ('Clusters (K)', str(k)),
-        ('Rows', f'{n_rows:,}'),
-        ('Features', str(len(feature_cols))),
-        ('Silhouette', f'{sil:.4f}'),
-        ('Davies-Bouldin', f'{db:.4f}'),
-        ('Inertia', f'{inertia:,.0f}'),
-    ]):
-        x = 0.08 + i * 0.155
-        ax.add_patch(plt.Rectangle((x, y - 0.055), 0.14, 0.065,
-                                    transform=ax.transAxes,
-                                    color='#ecf0f1', zorder=1, clip_on=False))
-        ax.text(x + 0.07, y - 0.01, val, transform=ax.transAxes,
-                fontsize=13, fontweight='bold', ha='center', va='center', color='#2c3e50')
-        ax.text(x + 0.07, y - 0.042, label, transform=ax.transAxes,
-                fontsize=7, ha='center', va='center', color='#888')
-
-    # Cluster size bars
-    y -= 0.12
-    ax.text(0.5, y, 'Cluster Size Overview',
-            transform=ax.transAxes, fontsize=13, fontweight='bold',
-            ha='center', color='#2c3e50')
-    y -= 0.04
-    bar_w = 0.6 / k
-    for c, count, pct in unique_counts:
-        x = 0.2 + c * bar_w
-        bar_h = 0.08 * (pct / max(p['pct'] for p in profiles))
-        ax.add_patch(plt.Rectangle((x, y - bar_h), bar_w * 0.85, bar_h,
-                                    transform=ax.transAxes,
-                                    color=cmap(c), alpha=0.85, clip_on=False))
-        ax.text(x + bar_w * 0.425, y - bar_h - 0.018,
-                f'C{c}\n{count:,}\n({pct}%)',
-                transform=ax.transAxes, fontsize=8, ha='center', va='top', color='#333')
-
-    # Cluster profiles text
-    y -= 0.16
-    ax.text(0.5, y, 'Cluster Profiles',
-            transform=ax.transAxes, fontsize=13, fontweight='bold',
-            ha='center', color='#2c3e50')
-    y -= 0.03
-
-    for p in profiles:
-        ax.add_patch(plt.Rectangle((0.05, y - 0.095), 0.9, 0.09,
-                                    transform=ax.transAxes,
-                                    color=cmap(p['cluster']), alpha=0.12, clip_on=False))
-        ax.add_patch(plt.Rectangle((0.05, y - 0.095), 0.008, 0.09,
-                                    transform=ax.transAxes,
-                                    color=cmap(p['cluster']), alpha=0.9, clip_on=False))
-        ax.text(0.07, y - 0.015,
-                f"Cluster {p['cluster']}  —  {p['count']:,} customers ({p['pct']}%)",
-                transform=ax.transAxes, fontsize=9, fontweight='bold', color='#2c3e50')
-        high_txt = '▲ ' + ',  '.join(f[0] for f in p['high']) if p['high'] else '—'
-        low_txt  = '▼ ' + ',  '.join(f[0] for f in p['low'])  if p['low']  else '—'
-        ax.text(0.07, y - 0.042, f'High: {high_txt}',
-                transform=ax.transAxes, fontsize=8, color='#27ae60')
-        ax.text(0.07, y - 0.068, f'Low:  {low_txt}',
-                transform=ax.transAxes, fontsize=8, color='#e74c3c')
-        y -= 0.11
-
-    plt.tight_layout()
-    return fig
-
+# ── PDF report builder (reportlab) ────────────────────────────────────────────
 
 def build_pdf_report(filename, n_rows, feature_cols, labels, k, km, sil, db,
                      clean_df, feature_matrix, profiles):
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.lib import colors
+    from reportlab.platypus import (
+        BaseDocTemplate, Frame, PageTemplate, NextPageTemplate,
+        Paragraph, Spacer, Table, TableStyle,
+        Image as RLImage, PageBreak, HRFlowable, KeepTogether,
+    )
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+
+    PAGE_W, PAGE_H = letter
+    MARGIN = 0.75 * inch
+    CW = PAGE_W - 2 * MARGIN          # usable content width
+    report_date = pd.Timestamp.now().strftime('%B %d, %Y')
+
+    # Brand palette
+    C_NAVY  = colors.HexColor('#1a2744')
+    C_BLUE  = colors.HexColor('#2980b9')
+    C_LIGHT = colors.HexColor('#f5f7fa')
+    C_GREEN = colors.HexColor('#27ae60')
+    C_RED   = colors.HexColor('#c0392b')
+    C_GRAY  = colors.HexColor('#7f8c8d')
+    C_DARK  = colors.HexColor('#2c3e50')
+
+    TAB10 = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd',
+              '#8c564b','#e377c2','#7f7f7f','#bcbd22','#17becf']
+
+    def ccolor(c):
+        return colors.HexColor(TAB10[c % len(TAB10)])
+
+    def tint(c, alpha=0.12):
+        h = TAB10[c % len(TAB10)].lstrip('#')
+        r, g, b = int(h[0:2],16), int(h[2:4],16), int(h[4:6],16)
+        return colors.Color((r*alpha + 255*(1-alpha))/255,
+                            (g*alpha + 255*(1-alpha))/255,
+                            (b*alpha + 255*(1-alpha))/255)
+
+    def ps(name, **kw):
+        d = dict(fontName='Helvetica', fontSize=10, textColor=C_DARK, leading=14)
+        d.update(kw)
+        return ParagraphStyle(name, **d)
+
+    def fig_img(fig, width):
+        b = io.BytesIO()
+        fig.savefig(b, format='png', dpi=150, bbox_inches='tight', facecolor='white')
+        b.seek(0)
+        aspect = fig.get_figheight() / fig.get_figwidth()
+        img = RLImage(b, width=width, height=width * aspect)
+        plt.close(fig)
+        return img
+
+    # ── Page callbacks ─────────────────────────────────────────────────────────
+    def on_cover(canvas, doc):
+        canvas.saveState()
+        canvas.setFillColor(C_NAVY)
+        canvas.rect(0, PAGE_H - 2.6*inch, PAGE_W, 2.6*inch, fill=1, stroke=0)
+        canvas.setFillColor(C_BLUE)
+        canvas.rect(0, PAGE_H - 2.65*inch, PAGE_W, 0.05*inch, fill=1, stroke=0)
+        canvas.restoreState()
+
+    def on_page(canvas, doc):
+        canvas.saveState()
+        canvas.setStrokeColor(C_NAVY)
+        canvas.setLineWidth(1.5)
+        canvas.line(MARGIN, PAGE_H - 0.52*inch, PAGE_W - MARGIN, PAGE_H - 0.52*inch)
+        canvas.setFont('Helvetica-Bold', 8)
+        canvas.setFillColor(C_NAVY)
+        canvas.drawString(MARGIN, PAGE_H - 0.42*inch, 'Customer Segmentation Report')
+        canvas.setFont('Helvetica', 8)
+        canvas.setFillColor(C_GRAY)
+        canvas.drawRightString(PAGE_W - MARGIN, PAGE_H - 0.42*inch, filename)
+        canvas.setStrokeColor(colors.HexColor('#dddddd'))
+        canvas.setLineWidth(0.5)
+        canvas.line(MARGIN, 0.58*inch, PAGE_W - MARGIN, 0.58*inch)
+        canvas.setFont('Helvetica', 7)
+        canvas.setFillColor(C_GRAY)
+        canvas.drawString(MARGIN, 0.42*inch, f'Generated {report_date}')
+        canvas.drawCentredString(PAGE_W/2, 0.42*inch, f'Page {doc.page}')
+        canvas.drawRightString(PAGE_W - MARGIN, 0.42*inch,
+                               f'K={k}  |  Silhouette={sil:.4f}')
+        canvas.restoreState()
+
+    # ── Document setup ─────────────────────────────────────────────────────────
     buf = io.BytesIO()
-    with PdfPages(buf) as pdf:
-        # Page 1 — cover + summary
-        fig = _pdf_cover(filename, n_rows, feature_cols, k,
-                         km.inertia_, sil, db, profiles)
-        pdf.savefig(fig, bbox_inches='tight')
-        plt.close(fig)
+    doc = BaseDocTemplate(buf, pagesize=letter,
+                          leftMargin=MARGIN, rightMargin=MARGIN,
+                          topMargin=MARGIN, bottomMargin=MARGIN)
+    cover_frame = Frame(MARGIN, MARGIN, CW, PAGE_H - 2*MARGIN, id='cover')
+    body_frame  = Frame(MARGIN, 0.75*inch, CW, PAGE_H - MARGIN - 0.85*inch, id='body')
+    doc.addPageTemplates([
+        PageTemplate(id='Cover', frames=[cover_frame], onPage=on_cover),
+        PageTemplate(id='Body',  frames=[body_frame],  onPage=on_page),
+    ])
 
-        # Page 2 — PCA scatter
-        fig = fig_pca_scatter(feature_matrix, labels, k)
-        fig.suptitle('PCA 2-D Projection', fontsize=13, fontweight='bold', y=1.01)
-        pdf.savefig(fig, bbox_inches='tight')
-        plt.close(fig)
+    story = []
 
-        # Page 3 — cluster sizes
-        fig = fig_cluster_sizes(labels, k)
-        pdf.savefig(fig, bbox_inches='tight')
-        plt.close(fig)
+    # ── Page 1: Cover ──────────────────────────────────────────────────────────
+    story.append(NextPageTemplate('Body'))
+    story.append(Spacer(1, 1.95*inch))
+    story.append(Paragraph('Customer Segmentation Report',
+                            ps('TT', fontSize=26, fontName='Helvetica-Bold',
+                               textColor=colors.white, alignment=TA_CENTER, leading=32)))
+    story.append(Spacer(1, 0.1*inch))
+    story.append(Paragraph(filename,
+                            ps('TF', fontSize=11, textColor=colors.HexColor('#aabdd0'),
+                               alignment=TA_CENTER)))
+    story.append(Paragraph(report_date,
+                            ps('TD', fontSize=10, textColor=colors.HexColor('#aabdd0'),
+                               alignment=TA_CENTER)))
+    story.append(Spacer(1, 0.4*inch))
 
-        # Page 4 — feature heatmap
-        fig, _ = fig_feature_heatmap(clean_df, feature_cols, labels, k, top_n=15)
-        pdf.savefig(fig, bbox_inches='tight')
-        plt.close(fig)
+    # Metric tiles
+    metrics = [
+        ('Clusters (K)', str(k)), ('Rows', f'{n_rows:,}'),
+        ('Features', str(len(feature_cols))), ('Silhouette', f'{sil:.4f}'),
+        ('Davies-Bouldin', f'{db:.4f}'), ('Inertia', f'{km.inertia_:,.0f}'),
+    ]
+    tw = CW / len(metrics)
+    mt = Table(
+        [[Paragraph(v, ps(f'MV{i}', fontSize=15, fontName='Helvetica-Bold',
+                           textColor=C_NAVY, alignment=TA_CENTER))
+          for i, (_, v) in enumerate(metrics)],
+         [Paragraph(l, ps(f'ML{i}', fontSize=7, textColor=C_GRAY,
+                           alignment=TA_CENTER, fontName='Helvetica-Oblique'))
+          for i, (l, _) in enumerate(metrics)]],
+        colWidths=[tw]*len(metrics),
+    )
+    mt.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), C_LIGHT),
+        ('LINEABOVE', (0,0), (-1,0), 3, C_BLUE),
+        ('LINEBEFORE', (1,0), (-1,-1), 0.5, colors.white),
+        ('TOPPADDING', (0,0), (-1,-1), 10),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 10),
+    ]))
+    story.append(mt)
+    story.append(Spacer(1, 0.25*inch))
 
-        # Page 5 — silhouette
-        fig = fig_silhouette(feature_matrix, labels, k)
-        pdf.savefig(fig, bbox_inches='tight')
-        plt.close(fig)
+    # Key findings
+    u_arr, c_arr = np.unique(labels, return_counts=True)
+    largest_c = int(u_arr[np.argmax(c_arr)])
+    sil_note = ('moderate cluster separation'
+                if sil > 0.3 else 'weak cluster separation — treat segments as tendencies')
+    findings = [
+        f'K-Means identified <b>{k} distinct customer segments</b> in this dataset.',
+        f'The largest segment is <b>Cluster {largest_c}</b> '
+        f'({max(c_arr):,} customers, {max(c_arr)/len(labels)*100:.1f}%).',
+        f'A silhouette score of <b>{sil:.4f}</b> indicates {sil_note}.',
+    ]
+    kf = Table(
+        [[Paragraph('Key Findings', ps('KFH', fontName='Helvetica-Bold',
+                                        fontSize=10, textColor=C_NAVY))]] +
+        [[Paragraph(f'• {f}', ps(f'KF{i}', fontSize=9, textColor=C_DARK, leading=13))]
+         for i, f in enumerate(findings)],
+        colWidths=[CW],
+    )
+    kf.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#eaf4fb')),
+        ('LINEABOVE', (0,0), (0,0), 3, C_BLUE),
+        ('TOPPADDING', (0,0), (-1,-1), 7), ('BOTTOMPADDING', (0,0), (-1,-1), 5),
+        ('LEFTPADDING', (0,0), (-1,-1), 10), ('RIGHTPADDING', (0,0), (-1,-1), 10),
+    ]))
+    story.append(kf)
+    story.append(Spacer(1, 0.25*inch))
 
-        pdf.infodict().update({
-            'Title': 'Customer Segmentation Report',
-            'Subject': f'{filename} — K={k}',
-        })
+    # Cluster summary table
+    story.append(Paragraph('Cluster Summary',
+                            ps('CS', fontName='Helvetica-Bold', fontSize=11,
+                               textColor=C_DARK, spaceAfter=6)))
+    hdr_s = ps('TH', fontName='Helvetica-Bold', fontSize=9, textColor=colors.white)
+    rows = [[Paragraph(h, hdr_s) for h in
+             ['Cluster', 'Customers', 'Share', 'Top Characteristics']]]
+    for p in profiles:
+        high_txt = ', '.join(f[0] for f in p['high'][:3]) if p['high'] else '—'
+        low_txt  = ', '.join(f[0] for f in p['low'][:2])  if p['low']  else '—'
+        rows.append([
+            Paragraph(f"Cluster {p['cluster']}",
+                       ps(f'CN{p["cluster"]}', fontName='Helvetica-Bold',
+                          fontSize=9, textColor=colors.white)),
+            Paragraph(f"{p['count']:,}",
+                       ps(f'CC{p["cluster"]}', fontSize=9, alignment=TA_CENTER)),
+            Paragraph(f"{p['pct']}%",
+                       ps(f'CP{p["cluster"]}', fontSize=9, alignment=TA_CENTER)),
+            Paragraph(
+                f'<font color="#27ae60">▲ {high_txt}</font><br/>'
+                f'<font color="#c0392b">▼ {low_txt}</font>',
+                ps(f'CD{p["cluster"]}', fontSize=8, leading=12)),
+        ])
+    cws = [CW*0.14, CW*0.14, CW*0.10, CW*0.62]
+    cts = TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), C_NAVY),
+        ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, C_LIGHT]),
+        ('GRID', (0,0), (-1,-1), 0.25, colors.HexColor('#cccccc')),
+        ('ALIGN', (1,0), (2,-1), 'CENTER'),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('TOPPADDING', (0,0), (-1,-1), 7), ('BOTTOMPADDING', (0,0), (-1,-1), 7),
+        ('LEFTPADDING', (0,0), (-1,-1), 8), ('RIGHTPADDING', (0,0), (-1,-1), 8),
+    ])
+    for i, p in enumerate(profiles):
+        cts.add('BACKGROUND', (0, i+1), (0, i+1), ccolor(p['cluster']))
+    ct = Table(rows, colWidths=cws)
+    ct.setStyle(cts)
+    story.append(ct)
 
+    # ── Page 2: Cluster Profiles ───────────────────────────────────────────────
+    story.append(PageBreak())
+    story.append(Paragraph('Cluster Profiles',
+                            ps('SEC', fontName='Helvetica-Bold', fontSize=16,
+                               textColor=C_NAVY, spaceAfter=4)))
+    story.append(HRFlowable(width='100%', thickness=2, color=C_NAVY, spaceAfter=8))
+    story.append(Paragraph(
+        'Each cluster is described by features where its customers score significantly '
+        'above (▲) or below (▼) the dataset average. Z-scores indicate magnitude.',
+        ps('INTRO', fontSize=9, textColor=C_GRAY, leading=13, spaceAfter=12)))
+
+    for p in profiles:
+        cc = ccolor(p['cluster'])
+        hdr_tbl = Table(
+            [[Paragraph(f"Cluster {p['cluster']}",
+                         ps(f'PH{p["cluster"]}', fontName='Helvetica-Bold',
+                            fontSize=13, textColor=colors.white)),
+              Paragraph(f"{p['count']:,} customers  ({p['pct']}%)",
+                         ps(f'PS{p["cluster"]}', fontSize=10,
+                            textColor=colors.white, alignment=TA_RIGHT))]],
+            colWidths=[CW*0.5, CW*0.5],
+        )
+        hdr_tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,-1), cc),
+            ('TOPPADDING', (0,0), (-1,-1), 8), ('BOTTOMPADDING', (0,0), (-1,-1), 8),
+            ('LEFTPADDING', (0,0), (-1,-1), 12), ('RIGHTPADDING', (0,0), (-1,-1), 12),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ]))
+
+        def feat_rows(items, clr):
+            return [[Paragraph(f[0], ps(f'FR_{f[0]}', fontSize=9,
+                                        textColor=clr, leading=13)),
+                     Paragraph(f'z={f[1]:+.2f}',
+                                ps(f'FZ_{f[0]}', fontSize=8, textColor=C_GRAY,
+                                   alignment=TA_RIGHT))]
+                    for f in items] if items else \
+                   [[Paragraph('No strongly differentiating features',
+                                ps('FRN', fontSize=9, textColor=C_GRAY, fontName='Helvetica-Oblique')),
+                     Paragraph('', ps('FZN'))]]
+
+        body_rows = (
+            [[Paragraph('▲  Notably High', ps('HL', fontName='Helvetica-Bold',
+                                               fontSize=9, textColor=C_GREEN)),
+              Paragraph('Z-Score', ps('ZL', fontSize=8, textColor=C_GRAY,
+                                      alignment=TA_RIGHT, fontName='Helvetica-Oblique'))]] +
+            feat_rows(p['high'], C_GREEN) +
+            [[Paragraph('▼  Notably Low', ps('LL', fontName='Helvetica-Bold',
+                                              fontSize=9, textColor=C_RED)),
+              Paragraph('', ps('LZ'))]] +
+            feat_rows(p['low'], C_RED)
+        )
+        body_tbl = Table(body_rows, colWidths=[CW*0.78, CW*0.22])
+        body_tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,-1), tint(p['cluster'])),
+            ('LINEBELOW', (0,0), (-1,0), 0.5, colors.HexColor('#cccccc')),
+            ('LINEBELOW', (0, len(p['high']) or 1), (-1, len(p['high']) or 1),
+             0.5, colors.HexColor('#cccccc')),
+            ('TOPPADDING', (0,0), (-1,-1), 5), ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+            ('LEFTPADDING', (0,0), (-1,-1), 12), ('RIGHTPADDING', (0,0), (-1,-1), 10),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ]))
+        story.append(KeepTogether([hdr_tbl, body_tbl]))
+        story.append(Spacer(1, 0.16*inch))
+
+    # ── Pages 3+: Charts ───────────────────────────────────────────────────────
+    chart_specs = [
+        ('PCA 2-D Projection',
+         'Each point represents one customer, coloured by cluster assignment. '
+         'Tight, well-separated groups indicate strong cluster structure.',
+         fig_pca_scatter(feature_matrix, labels, k)),
+        ('Cluster Size Distribution',
+         'Number of customers per cluster. Large imbalances may suggest K is too high.',
+         fig_cluster_sizes(labels, k)),
+        ('Feature Heatmap — Top 15 Differentiators',
+         'Z-scored cluster means. Green = above average for that feature; '
+         'Red = below average. Features are ranked by variance across clusters.',
+         fig_feature_heatmap(clean_df, feature_cols, labels, k, 15)[0]),
+        ('Silhouette Analysis',
+         'Per-customer silhouette coefficients by cluster. The red dashed line is '
+         'the overall average. Wider positive bands indicate tighter, more distinct clusters.',
+         fig_silhouette(feature_matrix, labels, k)),
+    ]
+
+    for title, caption, fig in chart_specs:
+        story.append(PageBreak())
+        story.append(Paragraph(title,
+                                ps(f'CT_{title}', fontName='Helvetica-Bold',
+                                   fontSize=14, textColor=C_NAVY, spaceAfter=4)))
+        story.append(HRFlowable(width='100%', thickness=1.5, color=C_BLUE, spaceAfter=6))
+        story.append(Paragraph(caption,
+                                ps(f'CC_{title}', fontSize=9, textColor=C_GRAY,
+                                   leading=13, spaceAfter=12)))
+        max_h = PAGE_H - 3.2*inch
+        aspect = fig.get_figheight() / fig.get_figwidth()
+        img_w = CW
+        img_h = img_w * aspect
+        if img_h > max_h:
+            img_h = max_h
+            img_w = img_h / aspect
+        story.append(fig_img(fig, img_w))
+
+    doc.build(story)
     buf.seek(0)
     return buf.read()
 
