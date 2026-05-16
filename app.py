@@ -579,10 +579,9 @@ if st.button('Run Clustering', type='primary'):
     )
     if duplicate is not None:
         existing[duplicate] = record
-        st.toast(f'History updated: {fname} K={int(chosen_k)} (overwrote duplicate)')
     else:
         existing.append(record)
-        st.toast(f'Run saved to history: {fname} K={int(chosen_k)}')
+    st.rerun()
 
 if st.session_state['cluster_metrics']:
     m = st.session_state['cluster_metrics']
