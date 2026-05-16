@@ -239,7 +239,7 @@ def fig_feature_boxplots(clean_df, feature_cols, labels, top_features, k, n_plot
     fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 3))
     axes = np.array(axes).flatten()
     for ax, feat in zip(axes, selected):
-        data = [df_tmp[df_tmp['Cluster'] == c][feat].values for c in range(k)]
+        data = [df_tmp[df_tmp['Cluster'] == c][feat].values.astype(float) for c in range(k)]
         bp = ax.boxplot(data, patch_artist=True)
         for patch, i in zip(bp['boxes'], range(k)):
             patch.set_facecolor(cmap(i))
