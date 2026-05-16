@@ -48,6 +48,7 @@ _DEFAULTS = {
     'clean_log': None,
     'k_results': None,
     'cluster_metrics': None,
+    'run_history': [],
 }
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
@@ -311,10 +312,118 @@ def fig_silhouette(X, labels, k):
     return fig
 
 
+# ── History helpers ────────────────────────────────────────────────────────────
+
+def make_history_record(filename, n_rows, feature_cols, k, km, labels, sil, db):
+    unique, counts = np.unique(labels, return_counts=True)
+    sizes = ', '.join(f'C{c}:{n}' for c, n in zip(unique, counts))
+    return {
+        'Timestamp': pd.Timestamp.now().strftime('%Y-%m-%d %H:%M'),
+        'File': filename,
+        'Rows': n_rows,
+        'Features': len(feature_cols),
+        'K': int(k),
+        'Inertia': round(float(km.inertia_), 1),
+        'Silhouette': round(float(sil), 4),
+        'Davies-Bouldin': round(float(db), 4),
+        'Cluster Sizes': sizes,
+        'Notes': '',
+    }
+
+
+_HISTORY_COLS = {'Timestamp', 'File', 'K', 'Silhouette', 'Davies-Bouldin'}
+
+
+def fig_history_comparison(history, filename):
+    runs = [r for r in history if r['File'] == filename]
+    if len(runs) < 2:
+        return None
+    df = pd.DataFrame(runs).sort_values('K')
+    best_k = df.loc[df['Silhouette'].idxmax(), 'K']
+
+    fig, ax1 = plt.subplots(figsize=(7, 3))
+    ax2 = ax1.twinx()
+    ax1.plot(df['K'], df['Silhouette'], marker='o', color='seagreen',
+             linewidth=2, label='Silhouette')
+    ax2.plot(df['K'], df['Inertia'], marker='s', color='steelblue',
+             linewidth=2, linestyle='--', label='Inertia')
+    ax1.axvline(best_k, color='red', linestyle=':', alpha=0.8,
+                label=f'Best K={best_k}')
+    ax1.set_xlabel('K')
+    ax1.set_ylabel('Silhouette Score', color='seagreen')
+    ax2.set_ylabel('Inertia', color='steelblue')
+    ax1.set_title(f'K Comparison — {filename}', fontweight='bold', fontsize=10)
+    lines = ax1.get_lines() + ax2.get_lines()
+    ax1.legend(lines, [l.get_label() for l in lines], fontsize=8, loc='upper right')
+    plt.tight_layout()
+    return fig
+
+
 # ── UI ─────────────────────────────────────────────────────────────────────────
 
 st.title('Customer Segmentation Analysis')
 st.caption('Upload a CSV or Excel file to profile, clean, cluster, and visualize your customer data.')
+
+# ── Sidebar — Run History ──────────────────────────────────────────────────────
+
+with st.sidebar:
+    st.header('Run History')
+
+    restore_file = st.file_uploader(
+        'Restore a saved history.csv',
+        type=['csv'],
+        key='history_uploader',
+    )
+    if restore_file is not None:
+        try:
+            restored = pd.read_csv(restore_file)
+            if _HISTORY_COLS.issubset(set(restored.columns)):
+                restored['Notes'] = restored.get('Notes', '').fillna('')
+                st.session_state['run_history'] = restored.to_dict('records')
+                st.success(f'Restored {len(restored)} run(s).')
+            else:
+                st.error('This does not look like a history file — expected columns are missing.')
+        except Exception as e:
+            st.error(f'Could not read file: {e}')
+
+    history = st.session_state['run_history']
+
+    if not history:
+        st.info('No runs yet. Complete a clustering run to start recording history.')
+    else:
+        hdf = pd.DataFrame(history)
+
+        st.download_button(
+            label='Download history.csv',
+            data=hdf.to_csv(index=False).encode(),
+            file_name='history.csv',
+            mime='text/csv',
+        )
+
+        st.dataframe(
+            hdf[['Timestamp', 'File', 'K', 'Silhouette', 'Davies-Bouldin']],
+            width='stretch',
+        )
+
+        best = max(history, key=lambda r: r['Silhouette'])
+        st.success(
+            f"Best overall: **{best['File']}** "
+            f"K={best['K']} — Silhouette {best['Silhouette']:.4f}"
+        )
+
+        current_file = st.session_state.get('uploaded_filename')
+        if current_file:
+            comparison_fig = fig_history_comparison(history, current_file)
+            if comparison_fig:
+                st.subheader(f'K Comparison')
+                st.pyplot(comparison_fig)
+                file_runs = [r for r in history if r['File'] == current_file]
+                best_for_file = max(file_runs, key=lambda r: r['Silhouette'])
+                st.info(
+                    f"Best for **{current_file}**: "
+                    f"K={best_for_file['K']} — "
+                    f"Silhouette {best_for_file['Silhouette']:.4f}"
+                )
 
 # ── 1. Upload ──────────────────────────────────────────────────────────────────
 
@@ -455,6 +564,25 @@ if st.button('Run Clustering', type='primary'):
             'unique': unique, 'counts': counts,
         },
     })
+
+    # ── Save to history ──────────────────────────────────────────────────────
+    fname = st.session_state.get('uploaded_filename', 'unknown')
+    existing = st.session_state['run_history']
+    duplicate = next(
+        (i for i, r in enumerate(existing)
+         if r['File'] == fname and r['K'] == int(chosen_k)),
+        None,
+    )
+    record = make_history_record(
+        fname, len(raw_df), st.session_state['feature_columns'],
+        int(chosen_k), km, labels, sil, db,
+    )
+    if duplicate is not None:
+        existing[duplicate] = record
+        st.toast(f'History updated: {fname} K={int(chosen_k)} (overwrote duplicate)')
+    else:
+        existing.append(record)
+        st.toast(f'Run saved to history: {fname} K={int(chosen_k)}')
 
 if st.session_state['cluster_metrics']:
     m = st.session_state['cluster_metrics']
