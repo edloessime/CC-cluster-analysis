@@ -119,7 +119,10 @@ def clean_and_preprocess(df, col_roles):
         df[numeric_cols] = SimpleImputer(strategy='median').fit_transform(df[numeric_cols])
         log.append(f'Imputed {len(numeric_cols)} numeric column(s) with median')
     if cat_cols:
-        df[cat_cols] = SimpleImputer(strategy='most_frequent').fit_transform(df[cat_cols])
+        for col in cat_cols:
+            if df[col].isna().any():
+                mode = df[col].mode()
+                df[col] = df[col].fillna(mode[0] if not mode.empty else 'Unknown')
         log.append(f'Imputed {len(cat_cols)} categorical column(s) with mode')
     if cat_cols:
         df = pd.get_dummies(df, columns=cat_cols, drop_first=False)
