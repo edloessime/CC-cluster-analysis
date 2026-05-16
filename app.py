@@ -1,5 +1,6 @@
 import io
 import warnings
+from matplotlib.backends.backend_pdf import PdfPages
 
 import matplotlib
 matplotlib.use('Agg')
@@ -312,6 +313,165 @@ def fig_silhouette(X, labels, k):
     return fig
 
 
+# ── Cluster profile helpers ────────────────────────────────────────────────────
+
+def build_cluster_profiles(clean_df, feature_cols, labels, k, top_n=5):
+    """Return a list of dicts describing each cluster in plain terms."""
+    df_tmp = clean_df[feature_cols].copy()
+    df_tmp['Cluster'] = labels
+    means = df_tmp.groupby('Cluster')[feature_cols].mean()
+    hm_z  = (means - means.mean()) / (means.std() + 1e-9)
+    unique, counts = np.unique(labels, return_counts=True)
+    total = len(labels)
+
+    profiles = []
+    for c in range(k):
+        z = hm_z.loc[c]
+        high = [(col.replace('_', ' '), round(val, 2))
+                for col, val in z.nlargest(top_n).items() if val > 0.3]
+        low  = [(col.replace('_', ' '), round(val, 2))
+                for col, val in z.nsmallest(top_n).items() if val < -0.3]
+        profiles.append({
+            'cluster': c,
+            'count':   int(counts[c]),
+            'pct':     round(counts[c] / total * 100, 1),
+            'high':    high,
+            'low':     low,
+        })
+    return profiles
+
+
+# ── PDF report builder ─────────────────────────────────────────────────────────
+
+def _pdf_cover(filename, n_rows, feature_cols, k, inertia, sil, db, profiles):
+    """Return a matplotlib figure that serves as the PDF cover/summary page."""
+    unique_counts = [(p['cluster'], p['count'], p['pct']) for p in profiles]
+    cmap = plt.cm.get_cmap(PALETTE, k)
+
+    fig = plt.figure(figsize=(8.5, 11))
+    fig.patch.set_facecolor('white')
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.axis('off')
+
+    # Header bar
+    ax.add_patch(plt.Rectangle((0, 0.88), 1, 0.12,
+                                transform=ax.transAxes, color='#2c3e50', zorder=0))
+    ax.text(0.5, 0.945, 'Customer Segmentation Report',
+            transform=ax.transAxes, fontsize=22, fontweight='bold',
+            color='white', ha='center', va='center')
+
+    y = 0.82
+    ax.text(0.5, y, f'File: {filename}',
+            transform=ax.transAxes, fontsize=11, ha='center', color='#555')
+    y -= 0.04
+    ax.text(0.5, y, pd.Timestamp.now().strftime('%B %d, %Y'),
+            transform=ax.transAxes, fontsize=10, ha='center', color='#888')
+
+    # Metrics row
+    y -= 0.07
+    for i, (label, val) in enumerate([
+        ('Clusters (K)', str(k)),
+        ('Rows', f'{n_rows:,}'),
+        ('Features', str(len(feature_cols))),
+        ('Silhouette', f'{sil:.4f}'),
+        ('Davies-Bouldin', f'{db:.4f}'),
+        ('Inertia', f'{inertia:,.0f}'),
+    ]):
+        x = 0.08 + i * 0.155
+        ax.add_patch(plt.Rectangle((x, y - 0.055), 0.14, 0.065,
+                                    transform=ax.transAxes,
+                                    color='#ecf0f1', zorder=1, clip_on=False))
+        ax.text(x + 0.07, y - 0.01, val, transform=ax.transAxes,
+                fontsize=13, fontweight='bold', ha='center', va='center', color='#2c3e50')
+        ax.text(x + 0.07, y - 0.042, label, transform=ax.transAxes,
+                fontsize=7, ha='center', va='center', color='#888')
+
+    # Cluster size bars
+    y -= 0.12
+    ax.text(0.5, y, 'Cluster Size Overview',
+            transform=ax.transAxes, fontsize=13, fontweight='bold',
+            ha='center', color='#2c3e50')
+    y -= 0.04
+    bar_w = 0.6 / k
+    for c, count, pct in unique_counts:
+        x = 0.2 + c * bar_w
+        bar_h = 0.08 * (pct / max(p['pct'] for p in profiles))
+        ax.add_patch(plt.Rectangle((x, y - bar_h), bar_w * 0.85, bar_h,
+                                    transform=ax.transAxes,
+                                    color=cmap(c), alpha=0.85, clip_on=False))
+        ax.text(x + bar_w * 0.425, y - bar_h - 0.018,
+                f'C{c}\n{count:,}\n({pct}%)',
+                transform=ax.transAxes, fontsize=8, ha='center', va='top', color='#333')
+
+    # Cluster profiles text
+    y -= 0.16
+    ax.text(0.5, y, 'Cluster Profiles',
+            transform=ax.transAxes, fontsize=13, fontweight='bold',
+            ha='center', color='#2c3e50')
+    y -= 0.03
+
+    for p in profiles:
+        ax.add_patch(plt.Rectangle((0.05, y - 0.095), 0.9, 0.09,
+                                    transform=ax.transAxes,
+                                    color=cmap(p['cluster']), alpha=0.12, clip_on=False))
+        ax.add_patch(plt.Rectangle((0.05, y - 0.095), 0.008, 0.09,
+                                    transform=ax.transAxes,
+                                    color=cmap(p['cluster']), alpha=0.9, clip_on=False))
+        ax.text(0.07, y - 0.015,
+                f"Cluster {p['cluster']}  —  {p['count']:,} customers ({p['pct']}%)",
+                transform=ax.transAxes, fontsize=9, fontweight='bold', color='#2c3e50')
+        high_txt = '▲ ' + ',  '.join(f[0] for f in p['high']) if p['high'] else '—'
+        low_txt  = '▼ ' + ',  '.join(f[0] for f in p['low'])  if p['low']  else '—'
+        ax.text(0.07, y - 0.042, f'High: {high_txt}',
+                transform=ax.transAxes, fontsize=8, color='#27ae60')
+        ax.text(0.07, y - 0.068, f'Low:  {low_txt}',
+                transform=ax.transAxes, fontsize=8, color='#e74c3c')
+        y -= 0.11
+
+    plt.tight_layout()
+    return fig
+
+
+def build_pdf_report(filename, n_rows, feature_cols, labels, k, km, sil, db,
+                     clean_df, feature_matrix, profiles):
+    buf = io.BytesIO()
+    with PdfPages(buf) as pdf:
+        # Page 1 — cover + summary
+        fig = _pdf_cover(filename, n_rows, feature_cols, k,
+                         km.inertia_, sil, db, profiles)
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+
+        # Page 2 — PCA scatter
+        fig = fig_pca_scatter(feature_matrix, labels, k)
+        fig.suptitle('PCA 2-D Projection', fontsize=13, fontweight='bold', y=1.01)
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+
+        # Page 3 — cluster sizes
+        fig = fig_cluster_sizes(labels, k)
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+
+        # Page 4 — feature heatmap
+        fig, _ = fig_feature_heatmap(clean_df, feature_cols, labels, k, top_n=15)
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+
+        # Page 5 — silhouette
+        fig = fig_silhouette(feature_matrix, labels, k)
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+
+        pdf.infodict().update({
+            'Title': 'Customer Segmentation Report',
+            'Subject': f'{filename} — K={k}',
+        })
+
+    buf.seek(0)
+    return buf.read()
+
+
 # ── History helpers ────────────────────────────────────────────────────────────
 
 def make_history_record(filename, n_rows, feature_cols, k, km, labels, sil, db):
@@ -611,9 +771,51 @@ k      = st.session_state['optimal_k']
 cdf    = st.session_state['clean_df']
 fcols  = st.session_state['feature_columns']
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ['PCA Scatter', 'Cluster Sizes', 'Feature Heatmap', 'Box Plots', 'Silhouette']
+tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ['Cluster Profiles', 'PCA Scatter', 'Cluster Sizes', 'Feature Heatmap', 'Box Plots', 'Silhouette']
 )
+
+profiles = build_cluster_profiles(cdf, fcols, labels, k)
+cmap = plt.cm.get_cmap(PALETTE, k)
+
+with tab0:
+    cols_per_row = min(k, 3)
+    rows = [profiles[i:i + cols_per_row] for i in range(0, k, cols_per_row)]
+    for row in rows:
+        card_cols = st.columns(len(row))
+        for col, p in zip(card_cols, row):
+            hex_color = '#%02x%02x%02x' % tuple(
+                int(v * 255) for v in cmap(p['cluster'])[:3]
+            )
+            with col:
+                with st.container(border=True):
+                    st.markdown(
+                        f"<div style='background:{hex_color};border-radius:6px;"
+                        f"padding:6px 10px;margin-bottom:8px'>"
+                        f"<span style='color:white;font-size:16px;font-weight:700'>"
+                        f"Cluster {p['cluster']}</span>"
+                        f"<span style='color:rgba(255,255,255,0.85);font-size:12px;"
+                        f"margin-left:10px'>{p['count']:,} customers "
+                        f"({p['pct']}%)</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                    if p['high']:
+                        st.markdown('**Notably high in:**')
+                        for feat, z in p['high']:
+                            st.markdown(f"- {feat} &nbsp; `z={z:+.2f}`",
+                                        unsafe_allow_html=True)
+                    else:
+                        st.markdown('*No strongly elevated features*')
+
+                    st.markdown('---')
+
+                    if p['low']:
+                        st.markdown('**Notably low in:**')
+                        for feat, z in p['low']:
+                            st.markdown(f"- {feat} &nbsp; `z={z:+.2f}`",
+                                        unsafe_allow_html=True)
+                    else:
+                        st.markdown('*No strongly suppressed features*')
 
 with tab1:
     st.pyplot(fig_pca_scatter(X, labels, k))
@@ -647,10 +849,36 @@ st.dataframe(
     width='stretch',
 )
 
-st.download_button(
-    label='Download segmented_customers.csv',
-    data=export_df.to_csv(index=False).encode(),
-    file_name='segmented_customers.csv',
-    mime='text/csv',
-    type='primary',
-)
+col_csv, col_pdf = st.columns(2)
+
+with col_csv:
+    st.download_button(
+        label='Download segmented_customers.csv',
+        data=export_df.to_csv(index=False).encode(),
+        file_name='segmented_customers.csv',
+        mime='text/csv',
+        type='primary',
+    )
+
+with col_pdf:
+    with st.spinner('Building PDF report...'):
+        pdf_bytes = build_pdf_report(
+            filename=st.session_state['uploaded_filename'],
+            n_rows=len(raw_df),
+            feature_cols=fcols,
+            labels=labels,
+            k=k,
+            km=st.session_state['km_model'],
+            sil=st.session_state['cluster_metrics']['sil'],
+            db=st.session_state['cluster_metrics']['db'],
+            clean_df=cdf,
+            feature_matrix=X,
+            profiles=profiles,
+        )
+    st.download_button(
+        label='Download PDF Report',
+        data=pdf_bytes,
+        file_name='segmentation_report.pdf',
+        mime='application/pdf',
+        type='primary',
+    )
