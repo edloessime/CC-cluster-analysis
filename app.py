@@ -396,6 +396,58 @@ def build_pdf_report(filename, n_rows, feature_cols, labels, k, km, sil, db,
         plt.close(fig)
         return img
 
+    def expand_fig_height(fig, target_h):
+        """Expand figure to at least target_h inches tall, redistributing axes."""
+        old_w, old_h = fig.get_size_inches()
+        if old_h < target_h:
+            fig.set_size_inches(old_w, target_h)
+            try:
+                fig.tight_layout()
+            except Exception:
+                pass
+        return fig
+
+    def pdf_heatmap(top_n=15):
+        """Heatmap sized for 7-inch PDF content width (avoids the extreme wide
+        aspect ratio of the screen version which collapses to ~2 inches tall)."""
+        df_tmp = clean_df[feature_cols].copy()
+        df_tmp['Cluster'] = labels
+        means = df_tmp.groupby('Cluster')[feature_cols].mean()
+        top_feats = means.var(axis=0).sort_values(ascending=False).head(top_n).index.tolist()
+        hm = means[top_feats]
+        hm_z = (hm - hm.mean()) / (hm.std() + 1e-9)
+
+        def short_label(name):
+            name = name.replace('_', ' ')
+            if len(name) > 12:
+                words = name.split()
+                lines, line = [], []
+                for w in words:
+                    if sum(len(x) + 1 for x in line) + len(w) > 12:
+                        lines.append(' '.join(line))
+                        line = [w]
+                    else:
+                        line.append(w)
+                if line:
+                    lines.append(' '.join(line))
+                return '\n'.join(lines)
+            return name
+
+        hm_z.columns = [short_label(f) for f in top_feats]
+        hm_z.index = [f'Cluster {i}' for i in hm_z.index]
+        fig, ax = plt.subplots(figsize=(7.0, 6.0))
+        sns.heatmap(hm_z, annot=True, fmt='.2f', annot_kws={'size': 8},
+                    cmap='RdYlGn', linewidths=0.5, linecolor='white',
+                    ax=ax, cbar_kws={'label': 'Z-score', 'shrink': 0.8})
+        ax.set_title(f'Top {top_n} Differentiating Features per Cluster (Z-scored means)',
+                     fontweight='bold', fontsize=11, pad=10)
+        ax.set_xlabel('')
+        ax.set_ylabel('')
+        ax.tick_params(axis='x', labelsize=7, rotation=40)
+        ax.tick_params(axis='y', labelsize=9, rotation=0)
+        fig.subplots_adjust(bottom=0.30, left=0.12, right=0.95, top=0.90)
+        return fig
+
     # ── Page callbacks ─────────────────────────────────────────────────────────
     def on_cover(canvas, doc):
         canvas.saveState()
@@ -403,6 +455,9 @@ def build_pdf_report(filename, n_rows, feature_cols, labels, k, km, sil, db,
         canvas.rect(0, PAGE_H - 2.6*inch, PAGE_W, 2.6*inch, fill=1, stroke=0)
         canvas.setFillColor(C_BLUE)
         canvas.rect(0, PAGE_H - 2.65*inch, PAGE_W, 0.05*inch, fill=1, stroke=0)
+        canvas.setFillColor(colors.white)
+        canvas.setFont('Helvetica-Bold', 26)
+        canvas.drawCentredString(PAGE_W / 2, PAGE_H - 1.4*inch, 'Customer Segmentation Report')
         canvas.restoreState()
 
     def on_page(canvas, doc):
@@ -442,12 +497,10 @@ def build_pdf_report(filename, n_rows, feature_cols, labels, k, km, sil, db,
     story = []
 
     # ── Page 1: Cover ──────────────────────────────────────────────────────────
+    # Title is drawn directly on canvas in on_cover; spacer pushes
+    # filename/date below the navy header (2.65" from top, margin=0.75").
     story.append(NextPageTemplate('Body'))
-    story.append(Spacer(1, 1.95*inch))
-    story.append(Paragraph('Customer Segmentation Report',
-                            ps('TT', fontSize=26, fontName='Helvetica-Bold',
-                               textColor=colors.white, alignment=TA_CENTER, leading=32)))
-    story.append(Spacer(1, 0.1*inch))
+    story.append(Spacer(1, 2.1*inch))
     story.append(Paragraph(filename,
                             ps('TF', fontSize=11, textColor=colors.HexColor('#aabdd0'),
                                alignment=TA_CENTER)))
@@ -617,18 +670,18 @@ def build_pdf_report(filename, n_rows, feature_cols, labels, k, km, sil, db,
         ('PCA 2-D Projection',
          'Each point represents one customer, coloured by cluster assignment. '
          'Tight, well-separated groups indicate strong cluster structure.',
-         fig_pca_scatter(feature_matrix, labels, k)),
+         expand_fig_height(fig_pca_scatter(feature_matrix, labels, k), 6.5)),
         ('Cluster Size Distribution',
          'Number of customers per cluster. Large imbalances may suggest K is too high.',
-         fig_cluster_sizes(labels, k)),
+         expand_fig_height(fig_cluster_sizes(labels, k), 6.5)),
         ('Feature Heatmap — Top 15 Differentiators',
          'Z-scored cluster means. Green = above average for that feature; '
          'Red = below average. Features are ranked by variance across clusters.',
-         fig_feature_heatmap(clean_df, feature_cols, labels, k, 15)[0]),
+         pdf_heatmap()),
         ('Silhouette Analysis',
          'Per-customer silhouette coefficients by cluster. The red dashed line is '
          'the overall average. Wider positive bands indicate tighter, more distinct clusters.',
-         fig_silhouette(feature_matrix, labels, k)),
+         expand_fig_height(fig_silhouette(feature_matrix, labels, k), 6.5)),
     ]
 
     for title, caption, fig in chart_specs:
