@@ -283,35 +283,35 @@ st.caption('Upload a CSV or Excel file to profile, clean, cluster, and visualize
 # ── 1. Upload ──────────────────────────────────────────────────────────────────
 
 st.header('1. Upload Data')
-uploaded = st.file_uploader('Choose a CSV or Excel file', type=['csv', 'xlsx', 'xls'])
 
-if uploaded is not None and uploaded.name != st.session_state.get('uploaded_filename'):
-    try:
-        if uploaded.name.endswith('.csv'):
-            df = pd.read_csv(uploaded)
-        else:
-            df = pd.read_excel(uploaded)
-        for key in ['col_roles', 'clean_df', 'feature_matrix', 'feature_columns',
-                    'scaler', 'optimal_k', 'cluster_labels', 'km_model',
-                    'clean_log', 'k_results', 'cluster_metrics']:
-            st.session_state[key] = _DEFAULTS[key]
-        st.session_state['raw_df'] = df
-        st.session_state['uploaded_filename'] = uploaded.name
-        st.success(f'Loaded **{uploaded.name}** — {df.shape[0]:,} rows × {df.shape[1]} columns')
-    except Exception as e:
-        st.error(f'Could not read file: {e}')
+if st.session_state['raw_df'] is None:
+    uploaded = st.file_uploader('Choose a CSV or Excel file', type=['csv', 'xlsx', 'xls'])
+    if uploaded is not None:
+        try:
+            if uploaded.name.endswith('.csv'):
+                df = pd.read_csv(uploaded)
+            else:
+                df = pd.read_excel(uploaded)
+            st.session_state['raw_df'] = df
+            st.session_state['uploaded_filename'] = uploaded.name
+            st.rerun()
+        except Exception as e:
+            st.error(f'Could not read file: {e}')
+            st.stop()
+    else:
+        st.info('Upload a file above to begin.')
         st.stop()
-
-if st.session_state.get('uploaded_filename'):
+else:
     st.success(
         f"Loaded **{st.session_state['uploaded_filename']}** — "
         f"{st.session_state['raw_df'].shape[0]:,} rows × "
         f"{st.session_state['raw_df'].shape[1]} columns"
     )
-
-if st.session_state['raw_df'] is None:
-    st.info('Upload a file above to begin.')
-    st.stop()
+    if st.button('Upload a different file'):
+        for key in _DEFAULTS:
+            st.session_state[key] = _DEFAULTS[key]
+        st.session_state['uploaded_filename'] = None
+        st.rerun()
 
 raw_df = st.session_state['raw_df']
 
