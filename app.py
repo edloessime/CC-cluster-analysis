@@ -45,6 +45,9 @@ _DEFAULTS = {
     'optimal_k': None,
     'cluster_labels': None,
     'km_model': None,
+    'clean_log': None,
+    'k_results': None,
+    'cluster_metrics': None,
 }
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
@@ -290,7 +293,8 @@ if uploaded is not None:
             df = pd.read_excel(uploaded)
         # Reset downstream state whenever a new file is loaded
         for key in ['col_roles', 'clean_df', 'feature_matrix', 'feature_columns',
-                    'scaler', 'optimal_k', 'cluster_labels', 'km_model']:
+                    'scaler', 'optimal_k', 'cluster_labels', 'km_model',
+                    'clean_log', 'k_results', 'cluster_metrics']:
             st.session_state[key] = _DEFAULTS[key]
         st.session_state['raw_df'] = df
         st.success(f'Loaded **{uploaded.name}** — {df.shape[0]:,} rows × {df.shape[1]} columns')
@@ -314,7 +318,7 @@ c1.metric('Rows', f'{raw_df.shape[0]:,}')
 c2.metric('Columns', raw_df.shape[1])
 c3.metric('Duplicate Rows', f'{raw_df.duplicated().sum():,}')
 
-st.dataframe(report_df, use_container_width=True)
+st.dataframe(report_df, width='stretch')
 
 high_missing = report_df[report_df['Missing'].astype(int) / len(raw_df) > 0.5]
 if not high_missing.empty:
@@ -323,7 +327,7 @@ if not high_missing.empty:
 numeric_cols_eval = report_df[report_df['Role'] == 'numeric']['Column'].tolist()
 if numeric_cols_eval:
     with st.expander('Numeric column statistics'):
-        st.dataframe(raw_df[numeric_cols_eval].describe().round(2), use_container_width=True)
+        st.dataframe(raw_df[numeric_cols_eval].describe().round(2), width='stretch')
 
 # ── 3. Clean ───────────────────────────────────────────────────────────────────
 
@@ -334,13 +338,20 @@ if st.button('Run Cleaning & Preprocessing', type='primary'):
         clean_df, X, feature_cols, scaler, log = clean_and_preprocess(
             raw_df.copy(), st.session_state['col_roles']
         )
-    for key, val in [('clean_df', clean_df), ('feature_matrix', X),
-                     ('feature_columns', feature_cols), ('scaler', scaler),
-                     ('cluster_labels', None), ('optimal_k', None)]:
-        st.session_state[key] = val
-    for msg in log:
+    st.session_state.update({
+        'clean_df': clean_df, 'feature_matrix': X,
+        'feature_columns': feature_cols, 'scaler': scaler,
+        'cluster_labels': None, 'optimal_k': None,
+        'clean_log': log, 'k_results': None, 'cluster_metrics': None,
+    })
+
+if st.session_state['clean_log']:
+    for msg in st.session_state['clean_log']:
         st.write(f'- {msg}')
-    st.success(f'Ready: {len(clean_df):,} rows × {len(feature_cols)} features')
+    st.success(
+        f"Ready: {len(st.session_state['clean_df']):,} rows "
+        f"× {len(st.session_state['feature_columns'])} features"
+    )
 
 if st.session_state['feature_matrix'] is None:
     st.stop()
@@ -362,9 +373,14 @@ if st.button('Evaluate K Range', type='primary'):
                 st.session_state['feature_matrix'], int(k_min), int(k_max)
             )
         st.session_state['optimal_k'] = best_k
-        st.pyplot(fig_k_selection(k_range, inertias, silhouettes, db_scores, best_k))
-        st.info(f'Suggested K = **{best_k}** (highest silhouette score). '
-                'You can override this below.')
+        st.session_state['k_results'] = (k_range, inertias, silhouettes, db_scores, best_k)
+        st.session_state['cluster_metrics'] = None
+
+if st.session_state['k_results']:
+    k_range, inertias, silhouettes, db_scores, best_k = st.session_state['k_results']
+    st.pyplot(fig_k_selection(k_range, inertias, silhouettes, db_scores, best_k))
+    st.info(f'Suggested K = **{best_k}** (highest silhouette score). '
+            'You can override this below.')
 
 # ── 5. Clustering ──────────────────────────────────────────────────────────────
 
@@ -383,26 +399,32 @@ if st.button('Run Clustering', type='primary'):
 
     cdf = st.session_state['clean_df'].copy()
     cdf['Cluster'] = labels
+    sil = silhouette_score(st.session_state['feature_matrix'], labels)
+    db  = davies_bouldin_score(st.session_state['feature_matrix'], labels)
+    unique, counts = np.unique(labels, return_counts=True)
     st.session_state.update({
         'cluster_labels': labels,
         'km_model': km,
         'clean_df': cdf,
         'optimal_k': int(chosen_k),
+        'cluster_metrics': {
+            'inertia': km.inertia_, 'sil': sil, 'db': db,
+            'unique': unique, 'counts': counts,
+        },
     })
 
-    sil = silhouette_score(st.session_state['feature_matrix'], labels)
-    db  = davies_bouldin_score(st.session_state['feature_matrix'], labels)
+if st.session_state['cluster_metrics']:
+    m = st.session_state['cluster_metrics']
     m1, m2, m3 = st.columns(3)
-    m1.metric('Inertia', f'{km.inertia_:,.1f}')
-    m2.metric('Silhouette Score', f'{sil:.4f}')
-    m3.metric('Davies-Bouldin', f'{db:.4f}')
-
-    unique, counts = np.unique(labels, return_counts=True)
+    m1.metric('Inertia', f"{m['inertia']:,.1f}")
+    m2.metric('Silhouette Score', f"{m['sil']:.4f}")
+    m3.metric('Davies-Bouldin', f"{m['db']:.4f}")
+    labels_total = sum(m['counts'])
     st.dataframe(pd.DataFrame({
-        'Cluster': unique,
-        'Count': counts,
-        'Share': [f'{c / len(labels) * 100:.1f}%' for c in counts],
-    }), use_container_width=True)
+        'Cluster': m['unique'],
+        'Count': m['counts'],
+        'Share': [f'{c / labels_total * 100:.1f}%' for c in m['counts']],
+    }), width='stretch')
     st.success('Clustering complete. See visualizations below.')
 
 if st.session_state['cluster_labels'] is None:
@@ -451,7 +473,7 @@ export_df['Cluster'] = labels
 
 st.dataframe(
     export_df.groupby('Cluster').size().rename('count').reset_index(),
-    use_container_width=True,
+    width='stretch',
 )
 
 st.download_button(
