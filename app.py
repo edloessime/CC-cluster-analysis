@@ -156,7 +156,7 @@ def find_optimal_k(X, k_min, k_max):
 # ── Plot helpers ───────────────────────────────────────────────────────────────
 
 def _cmap(k):
-    return plt.cm.get_cmap(PALETTE, k)
+    return plt.colormaps[PALETTE].resampled(k)
 
 
 def fig_k_selection(k_range, inertias, silhouettes, db_scores, best_k):
@@ -1011,7 +1011,7 @@ tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs(
 )
 
 profiles = build_cluster_profiles(cdf, fcols, labels, k)
-cmap = plt.cm.get_cmap(PALETTE, k)
+cmap = plt.colormaps[PALETTE].resampled(k)
 
 with tab0:
     cols_per_row = min(k, 3)
